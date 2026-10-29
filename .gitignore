@@ -1,0 +1,51 @@
+# PlatformIO build/cache outputs
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code / PlatformIO user workspace files
+# （保留插件推荐清单，其余工程索引文件不入库）
+.vscode/*
+!.vscode/extensions.json
+
+# Generated firmware/filesystem artifacts copied outside .pio
+*.elf
+*.map
+*.hex
+*.bin
+*.uf2
+*.img
+*.partitions.bin
+*.bootloader.bin
+
+# Serial logs / local debug output
+*.log
+*.trace
+*.dump
+*.dmp
+core
+core.*
+
+# Python caches / helper scripts output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS/editor temporary files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+.claude/

@@ -1,0 +1,2 @@
+# 占位文件：让 PlatformIO 的 Build Filesystem Image 有目标目录。
+# 后续把需要打包进 LittleFS 的网页 / 配置 / 音频文件放到本目录下。
