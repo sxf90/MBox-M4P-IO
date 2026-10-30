@@ -1,9 +1,9 @@
 # MBox-M4P-IO 使用与架构说明
 
-> **文档版本**：v1.1（对应 5 键 → 流媒体页面切换版本；v1.1 增补 2.6「按键检测原理 / 上下拉」）
-> **硬件平台**：ESP32 DevKit V1（esp32doit-devkit-v1）+ SN65HVD230 3.3V CAN 模块 + 8 路独立按键板（只用 S1~S5）
+> **文档版本**：v1.2（v1.2 新增「监听 `0x15` 的 FCW/RCW → 蜂鸣器」第二条业务；按键业务与引脚未变）
+> **硬件平台**：ESP32 DevKit V1（esp32doit-devkit-v1）+ SN65HVD230 3.3V CAN 模块 + 8 路独立按键板（只用 S1~S5）+ 5V 有源蜂鸣器模块（高电平触发）
 > **开发环境**：PlatformIO（platform espressif32 7.0.1 / framework-arduinoespressif32 3.20017）
-> **构建状态**：`pio run` 编译通过，RAM 6.7%（21840 / 327680 B），Flash 21.6%（282797 / 1310720 B）
+> **构建状态**：`pio run` 编译通过，RAM 6.7%（21896 / 327680 B），Flash 21.9%（286913 / 1310720 B）
 
 ---
 
@@ -31,6 +31,8 @@
 | F7 | 状态可观测 | 串口逐帧打印报文内容 + `p` 命令打印统计 + `t` 命令打印映射表 |
 | F8 | 链路自愈 | CAN 控制器 bus-off 后每 100ms 巡检一次并自动恢复 |
 | F9 | 无按键板也能验 | 串口 `k1~k5` 模拟按键，报文与真实按键完全一致 |
+| F10 | 预警蜂鸣（第二条业务） | 监听 `0x15` 的 FCW（`B3.2`）/ RCW（`B3.0~B3.1`），驱动 GPIO23 蜂鸣器：FCW = 长鸣，RCW = 150ms 响 / 150ms 停 |
+| F11 | 预警优先级与补拍 | FCW 优先于 RCW；预警消失时补完当前这一拍再停（与 VoiceBox 行为一致）；`0x15` 超时 500ms 没来则强制静音 |
 
 ### 1.3 本工程不做什么
 
@@ -38,7 +40,8 @@
   没有"当前流媒体页面"字段，读不回真实状态 —— 一旦丢帧或用户在 MBox 上手点屏幕，翻页方案会永久错位。
 - **不做上电发帧**：MBox 上电默认就是 `0x41`，本板上电**一帧都不发**，不去改动任何页面。
 - **不做长按连发**：页面是幂等的绝对量，按住狂发没有意义，还会和 MBox 本地操作打架。
-- **不解析接收报文**：`can/CanBits.h` 已具备位域解析能力，但当前业务只发不收。
+- **接收只解析 `0x15` 的 FCW/RCW**：`0x15` 其余字段（BSD/LCW/摄像头状态/SD 卡/生命信号）只打日志不驱动任何动作；
+  总线上其它帧一律丢弃，不做任何业务处理。
 
 ---
 
@@ -55,6 +58,7 @@
 | 5 | CAN 分析仪（调试用） | 1 | 可选，抓 `0x24` 验证 |
 | 6 | 上拉电阻 4.7kΩ~10kΩ × 5 | 可选 | **只有长线 / 强干扰 / 触点氧化才需要**（短杜邦线台架不需要，见 2.6.4） |
 | 7 | 100nF 陶瓷电容 × 5 | 可选 | 配合外部上拉做 RC 滤波，按需（见 2.6.4） |
+| 8 | 5V 有源蜂鸣器模块（高电平触发，自带三极管） | 1 | 预警提示用；模块 `VCC → VIN/5V`、`IO → GPIO23`；**不要用裸蜂鸣器直连 IO**（见 2.2 蜂鸣器部分） |
 
 ### 2.2 接线表
 
@@ -85,6 +89,19 @@
 若改用 COM 接 3V3，把 `platformio.ini` 里的 `-DKEY_COM_TO_GND=0` 改成 `0`（内部下拉，按下 = HIGH）。
 上下拉由 ESP32 芯片内部提供、按键板本身没有电阻，原理见 **2.6**。
 
+#### 蜂鸣器部分（3 根，v1.2 新增）
+
+| 蜂鸣器模块引脚 | 接到 ESP32 | 说明 |
+|---|---|---|
+| `VCC` | `VIN` / `5V` | 5V 有源模块 **不要接 3V3**（音量小甚至不响）；USB 供电足够（模块约 25~30mA） |
+| `GND` | `GND` | **必须与 CAN 模块、按键板 COM 共地** |
+| `IO`（信号） | `GPIO23` | 高电平触发（`BUZZER_ACTIVE_HIGH=1`）；串 100Ω 限流更稳妥 |
+
+- 可选：`GPIO23 → 100kΩ → GND` 下拉，进一步防止上电瞬间误响（固件里已先 `digitalWrite(LOW)`）。
+- 若模块是**低电平触发**（低电平长鸣）：把 `-DBUZZER_ACTIVE_HIGH=0` 即可，代码不用动。
+- 若 5V 模块用 3.3V 电平推不动（少数 CMOS 输入型）：模块 `VCC` 改接 `3V3`（能响但音量略小），或加一级 NPN/2N7000 驱动。
+- **S4 仍占 GPIO19**，蜂鸣器用 GPIO23 —— 按键引脚与按键业务一行未改。
+
 ### 2.3 接线示意
 
 ```
@@ -102,6 +119,11 @@
   GPIO21 ──── S5 ─┤                                 │
   GND ─────── COM ┘                                 │
                                                     │
+  VIN/5V ──── VCC ┐                                 │
+  GND ─────── GND ┼── 5V 有源蜂鸣器模块             │
+  GPIO23 ──── IO  ┘   (高电平触发, 预警提示)        │
+                                                    │
+                                                    │
              ┌────────────────────────┐             │
              │        ESP32           │             │
              │   DevKit V1            │             │
@@ -115,9 +137,10 @@
 |---|---|
 | GPIO4 / GPIO5 | TWAI 默认可用脚，已避开所有 strapping 脚 |
 | GPIO13 / 14 / 18 / 21 | 均带内部上拉、非 strapping 脚、不占 Flash(6-11) / UART0(1,3) / CAN(4,5) |
-| GPIO19 | 带内部上拉，可用；**`platformio.ini` 里把 GPIO19 注释预留给了蜂鸣器**，若以后要加蜂鸣器，把 S4 改到 GPIO23（只改 `BoardPins.h` 一行） |
+| GPIO19 | 带内部上拉，可用；**S4 固定占用 GPIO19（v1.2 起保持不变）**，蜂鸣器改用 GPIO23，不需要改动按键接线 |
 | GPIO21 | I2C 默认 SDA，本工程未启用 I2C，可放心占用 |
-| GPIO22 / 23 / 25 | 本工程**不再使用**（S6~S8 不接线）；GPIO22 注释里预留给了 WS2812 灯带 |
+| GPIO23 | v1.2 起分配给蜂鸣器（`BUZZER_PIN`）：空闲、非 strapping、可输出，原为 S6 预留脚 |
+| GPIO22 / 25 | 本工程**不再使用**；GPIO22 注释里预留给了 WS2812 灯带 |
 
 > **不要用**：GPIO6~11（接 Flash，一碰就重启）、GPIO1/3（UART0 日志口）、GPIO0/2/12/15（strapping 脚，影响启动模式）。
 >
@@ -132,7 +155,8 @@
 3. `CAN_TX(D) → GPIO5`、`CAN_RX(R) → GPIO4`，**没有接反**（接反的现象是发送永远失败、TEC 飙升）；
 4. 总线未上电时量 `CANH-CANL` 电阻：60Ω（两端各 120Ω）或 120Ω（仅一端）；
 5. 按键板 `COM` 接 **GND**，S1~S5 分别接 GPIO13/14/18/19/21；
-6. 按一下按键，用万用表量对应 GPIO 与 GND 应导通（< 1Ω）。
+6. 按一下按键，用万用表量对应 GPIO 与 GND 应导通（< 1Ω）；
+7. 蜂鸣器模块 `VCC → VIN/5V`、`GND → GND`、`IO → GPIO23`，上电后应**不响**（固件初始化即拉低）。
 
 ### 2.6 按键检测原理：上下拉到底是谁做的？
 
@@ -317,6 +341,48 @@ Data = 00 00 00 42 00 00 00 00
 因此 `KeyCanMap.h` 里 5 行的 `data[0] / data[1] / data[2]` **必须全部是 `0x00`**，
 只允许改 `data[3]`。这也是为什么每次按键都发"整帧 8 字节"而不是"只发一个字节"。
 
+### 3.6 `0x15` 预警状态帧（v1.2 新增，**只监听、不发送**）
+
+出处：同一份公版协议里 `0x15` 报文段；方向列标 **S = ADAS 广播**（MBox/记录仪 → 总线），
+**标准帧（11bit）、DLC = 8、周期 100ms**，本板只做监听。
+
+| 字节 | 位 | 字段 | 取值 | 本工程用法 |
+|---|---|---|---|---|
+| B0 | 0~3 / 4~7 | 软件次 / 主版本号 | —— | 忽略 |
+| B1 | 0~5 | 前/中/后摄像头离线、帧率异常 | 0 = 正常，1 = 异常 | 忽略（可看日志） |
+| B1 | 6~7 | SD 卡状态 | 0/1/2/3 | 忽略 |
+| B2 | 0~1 / 2~3 | 左 / 右**盲区 BSD** | 0 未触发 / 1 一级 / 2 二级 | **解码但不发声**（只打日志） |
+| B2 | 4~5 / 6~7 | 左 / 右**变道 LCW** | 同上 | **解码但不发声**（只打日志） |
+| **B3** | **0~1** | **后车碰撞预警 RCW** | **0 未触发 / 1 一级 / 2 二级** | ✅ **滴滴滴**（150ms 响 / 150ms 停） |
+| **B3** | **2** | **前车碰撞预警 FCW** | **0 未触发 / 1 预警** | ✅ **长鸣**（优先级最高） |
+| B3 | 3 / 4 / 5 | FDW / 起步提醒 / 车道偏航 | 0/1 | 忽略 |
+| B3 | 6 | 头盔佩戴识别 | 0 未戴 / 1 已戴 | 忽略 |
+| B4 | 0~3 | BSD/LCW/RCW/FCW **功能开关状态** | 0 关 / 1 开 | 忽略（可选：关闭时强制静音） |
+| B6 | 8bit | 生命信号 0~255 循环 | —— | 忽略（可选：链路健康判定） |
+
+**解码就两行**（`src/config/AlarmMap.h` 的 `ALARM_SIGNALS[]` 表 + `alarmExtractField()`）：
+
+```cpp
+const uint8_t rcw = (data[3] >> 0) & 0x03;   // 1 = 一级, 2 = 二级 → 滴滴滴
+const bool    fcw = (data[3] >> 2) & 0x01;   // 1 = 触发          → 长鸣
+```
+
+> ⚠️ **位序说明**：协议表标注 "Motorola LSB"，而 `起始Bit`（RCW=24 / FCW=26）是**字节内自 LSB 起**的线性编号，
+> 且这两个字段都完整落在 B3 一个字节内 —— 此时 Intel/LSB-first 与 Motorola 结果相同，所以默认按 LSB 起解码。
+> 若现场实测发现位序是"字节内自 MSB 起"，把 `platformio.ini` 的 `-DALARM_BIT_ORDER_MSB=1` 打开即可，
+> 业务代码一行不用改（`alarmExtractField()` 会自动换算 shift）。
+
+**台架可直接照发的样例**（USB-CAN 分析仪以 100ms 周期发 `0x15`、标准帧、DLC 8，只改 `data[3]`）：
+
+| 场景 | `data[3]` | 期望现象 |
+|---|---|---|
+| 无预警 | `0x00` | 不响 |
+| RCW 一级 | `0x01` | 滴滴滴（150ms 响 / 150ms 停，约 3.3 次/秒） |
+| RCW 二级 | `0x02` | 同上（蜂鸣器不区分等级） |
+| FCW | `0x04` | 持续长鸣 |
+| RCW + FCW | `0x05` | 长鸣（FCW 优先） |
+| 其余字节 | 任意 | 版本/卡状态/摄像头/BSD/LCW 全部只打日志 |
+
 ---
 
 ## 4. 工作流
@@ -338,6 +404,9 @@ Data = 00 00 00 42 00 00 00 00
   ├─ keyCanBusiness.begin(&keyPad)                 打印映射表 + 发送策略
   ├─ keyPad.onEvent(...)                           绑定 按键事件 → KeyCanBusiness
   │
+  ├─ alarmBusiness.begin()                         【v1.2】蜂鸣器初始化（先拉低静音）+ 注册 canBus.onFrame
+  │    └─ 打印 "预警监听已启动：ID=0x015 ... 链路超时 500ms"
+  │
   └─ 打印串口命令提示 → 进入 loop()
         ★ 此时此刻不会发送任何 CAN 帧，MBox 保持它自己的默认页面（通常就是 0x41）
 ```
@@ -348,10 +417,16 @@ Data = 00 00 00 42 00 00 00 00
 
 | 顺序 | 调用 | 周期 / 门限 | 干什么 |
 |---|---|---|---|
-| 1 | `canBus.poll()` | 每次 loop | 排空接收队列（触发 `onFrame` 回调）+ 每 100ms 巡检一次总线健康（TEC/REC/bus-off，自动恢复） |
+| 1 | `canBus.poll()` | 每次 loop | 排空接收队列（触发 `onFrame` 回调，`0x15` 预警帧在这里处理）+ 每 100ms 巡检一次总线健康（TEC/REC/bus-off，自动恢复） |
 | 2 | `keyPad.poll()` | 内部 5ms 门限 | 读 5 路电平 → 时间消抖 → 产生 PRESS / RELEASE 事件 → 调 `onEvent` 回调 |
 | 3 | `keyCanBusiness.tick()` | 每次 loop | 推进补发帧（第 2、3 帧）、HOLD_REPEAT 长按连发、空闲保活帧 |
-| 4 | `handleSerialCommand()` | 每次 loop | 解析串口命令 `k1~k5` / `p` / `t` |
+| 4 | `alarmBusiness.tick()` | 每次 loop | 【v1.2】`0x15` 链路超时检查：超过 `ALARM_LINK_TIMEOUT_MS`（默认 500ms）没收到 → 强制静音 |
+| 5 | `buzzer.poll()` | 每次 loop | 【v1.2】推进 RCW 滴滴滴节拍（150ms 响 / 150ms 停），处理"预警消失后补完这一拍" |
+| 6 | `handleSerialCommand()` | 每次 loop | 解析串口命令 `k1~k5` / `f` / `r` / `x` / `b` / `p` / `t` |
+
+> **两条业务并行、互不引用**：按键链路 `keyPad → keyCanBusiness`（发 `0x24`）与预警链路
+> `canBus.onFrame → alarmBusiness → buzzer`（收 `0x15`）之间没有任何调用关系，
+> 蜂鸣器响不响都不影响按键扫描与报文发送。
 
 > 为什么补发帧放 `tick()` 而不用 `delay(20)`：`delay()` 期间按键不扫描、接收不排空，
 > 20ms × 3 帧会让按键响应整体变慢。现在"按下确认 → 第 1 帧"是**同一个 loop 内完成**（0 延迟）。
@@ -413,6 +488,43 @@ MBox 视角：收到第 1 帧就已经切到 `0x42`；第 2、3 帧是同一个�
 | CAN 初始化失败 | 按键仍扫描、日志照打，只是每帧都"发送失败" | 便于在现场区分"按键问题"与"CAN 问题" |
 | 连续按不同键（如 S1→S2→S3） | 每次都正常发 3 帧（互斥只影响"未发完的旧键帧"） | 顺序操作是最常见用法 |
 
+### 4.6 预警蜂鸣逻辑（v1.2，从 VoiceBox 原样移植）
+
+`0x15` 每 100ms 来一帧，蜂鸣器表现只由 **FCW / RCW 的整体活跃态**决定：
+
+| 场景 | 行为 | 代码位置 |
+|---|---|---|
+| FCW 触发 | **持续长鸣**（GPIO 一直有效电平） | `Buzzer::onWarning()` → `Mode::FCW_LONG` |
+| RCW 触发 | **滴滴滴**：150ms 响 / 150ms 停 循环 | `Buzzer::poll()` 翻转 `_rcwToggleAt` |
+| FCW + RCW 同时 | **长鸣**（FCW 优先级最高，不会切滴滴滴） | `_currentMode()` 先判 FCW |
+| FCW 期间 RCW 消失 | 保持长鸣（无变化） | 同模式不打断 |
+| RCW 期间 FCW 出现 | 立即从滴滴滴切到长鸣 | 新模式 ≠ 当前模式 |
+| FCW 消失（还有 RCW） | 切到滴滴滴，从"响"重新起拍 | 下降沿 + 仍有低优先级 |
+| FCW 消失（无其它） | **立即停**（长鸣不补拍） | `_pendingEnd` 在 `FCW_LONG` 分支立即停 |
+| RCW 消失（在"响"的阶段） | **补完这一拍 150ms 再停** | `_pendingEnd` + `_rcwOn` |
+| RCW 消失（在"停"的阶段） | **立即静音** | `_pendingEnd` + `!_rcwOn` |
+| 预警等级 L1→L2 | 表现不变（只影响日志里的等级） | 等级不参与蜂鸣 |
+| BSD / LCW 触发 | **不发声**，只在日志里出现 | `onWarning()` 直接 return |
+| 500ms 没收到 `0x15` | 判定链路中断 → 强制静音（走正常下降沿，RCW 仍补一拍） | `AlarmBusiness::tick()` |
+
+时间轴（RCW 触发 → 消失，例：3.3 次/秒）：
+
+```
+RCW 位=1 ─┬──────────────────────────────────────────
+蜂鸣器    │‾‾‾150‾‾‾|___150___|‾‾‾150‾‾‾|___150___|‾‾‾150‾‾‾|___________
+RCW 位=0 ─┴──────────────────────────────────────────────────────▲ 在这一拍"响"期间消失
+                                                                 └→ 这一拍响满 150ms 才停（补一拍）
+```
+
+**为什么必须做"类型级聚合"**（`AlarmBusiness::_activeCounts` + `_levels`）：
+`0x15` 是周期帧，如果每帧都调用一次 `buzzer.onWarning(active=true)`，会不停刷新内部时间戳，
+滴滴滴永远停在"第一拍"上响不停。因此只有"某类型从无到有 / 从有到无 / 最高等级变化"才发一次事件
+（与 VoiceBox 的 `SignalProcessor` 思路一致）。
+
+**为什么加链路超时（VoiceBox 没有）**：若正在 FCW 长鸣时 MBox 掉电或总线断开，`0x15` 停发，
+蜂鸣器会一直叫下去。500ms（≈丢 5 帧）无帧即强制静音；`-DALARM_LINK_TIMEOUT_MS=0` 可关闭此保护，
+行为回到与 VoiceBox 完全一致。
+
 ---
 
 ## 5. 代码架构
@@ -428,7 +540,8 @@ MBox-M4P-IO/
 └─ src/
    ├─ main.cpp                    程序入口：初始化顺序、主循环、串口调试命令
    ├─ config/
-   │  └─ BoardPins.h              所有「可配置项」集中营：引脚 / 波特率 / 模式 / 按键数量 / 发送策略
+   │  ├─ BoardPins.h              所有「可配置项」集中营：引脚 / 波特率 / 模式 / 按键数量 / 发送策略 / 蜂鸣器
+   │  └─ AlarmMap.h               ★ 0x15 预警信号表（哪个字节哪几位 = FCW/RCW），一行一个信号
    ├─ input/
    │  ├─ KeyPad.h                 按键扫描接口（事件定义、API）
    │  └─ KeyPad.cpp               内部上拉/下拉 + 5ms 节拍 + 25ms 时间消抖 + 边沿事件 + 引脚探测
@@ -436,11 +549,15 @@ MBox-M4P-IO/
    │  ├─ CanFrame.h               与硬件无关的一帧报文结构（id/extended/rtr/dlc/data/timestamp）
    │  ├─ CanBus.h                 TWAI 驱动封装接口（Config / Stats / 回调注册）
    │  ├─ CanBus.cpp               初始化、发送（含可选自测）、接收排空、bus-off 自动恢复、统计
-   │  ├─ CanBits.h                位域打包/解析工具（跨字节、大小端），当前发送侧未用到
+   │  ├─ CanBits.h                位域打包/解析工具（跨字节、大小端），当前业务未用到
    │  └─ CanBits.cpp              CanBits 实现
+   ├─ buzzer/
+   │  ├─ Buzzer.h                 预警蜂鸣接口（Mode / onWarning / poll）
+   │  └─ Buzzer.cpp               状态机：FCW 长鸣 / RCW 滴滴滴 / 优先级 / 补一拍（从 VoiceBox 移植）
    └─ app/
       ├─ KeyCanMap.h              ★ 按键 → 报文映射表（唯一需要改报文的地方）
-      └─ KeyCanBusiness.h/.cpp    业务层：发送策略（3 帧 / 抑制 / 互斥 / 保活）、日志、统计
+      ├─ KeyCanBusiness.h/.cpp    业务层：发送策略（3 帧 / 抑制 / 互斥 / 保活）、日志、统计
+      └─ AlarmBusiness.h/.cpp     业务层：监听 0x15 → 解码 → 类型级聚合 → 驱动蜂鸣器 + 链路超时
 ```
 
 ### 5.2 分层与依赖方向
@@ -451,18 +568,22 @@ MBox-M4P-IO/
 ├───────────────────────────────────────────────────────────────┤
 │ app/    KeyCanBusiness   业务逻辑：什么时候发、发几帧、怎么去重     │
 │         KeyCanMap.h      纯数据：哪个键 → 哪一帧（客户协议细节只在这）│
+│         AlarmBusiness    业务逻辑：0x15 解码/聚合/超时 → 送蜂鸣器   │
 ├───────────────────────────────────────────────────────────────┤
+│ buzzer/ Buzzer           只管"响不响、怎么响"，不知道 CAN 与按键   │
 │ input/  KeyPad           只管"哪个键被按下了/松开了"，不知道 CAN   │
-│ can/    CanBus/CanFrame  只管"把 N 字节按某 ID 发出去"，不知道按键 │
+│ can/    CanBus/CanFrame  只管"把 N 字节按某 ID 发出去 / 收进来"    │
 ├───────────────────────────────────────────────────────────────┤
-│ config/ BoardPins.h      引脚、波特率、模式、数量、策略宏          │
+│ config/ BoardPins.h + AlarmMap.h   引脚、波特率、策略宏、0x15 信号表│
 └───────────────────────────────────────────────────────────────┘
-依赖方向：只向下依赖（main → app → input/can → config）
+依赖方向：只向下依赖（main → app → buzzer/input/can → config）
 ```
 
 设计原则：
 - **`app` 层不知道 GPIO 号**，`can` 层不知道有几个按键 —— 换引脚不改业务，换报文不改驱动。
-- **客户协议细节只出现在 `KeyCanMap.h`**，业务代码对它零耦合（`KeyCanBusiness.cpp` 里没有 `0x24`、没有 `0x41`）。
+- **客户协议细节只出现在 `KeyCanMap.h`（发送 0x24）与 `AlarmMap.h`（接收 0x15）**，
+  业务代码对它零耦合（`KeyCanBusiness.cpp` 里没有 `0x24`、没有 `0x41`；`AlarmBusiness.cpp` 里没有字节号）。
+- **两条业务互不引用**：`AlarmBusiness` 不认识 `KeyPad`，`KeyCanBusiness` 不认识 `Buzzer`。
 - **`config/BoardPins.h` 是唯一的"可调面板"**，`platformio.ini` 里的 `-D` 宏可覆盖它（现场不改源码也能调参）。
 
 ### 5.3 数据流
@@ -490,7 +611,22 @@ CanBus::transmit()  ──→ ESP32 TWAI 驱动 ──→ GPIO5(TX)/GPIO4(RX)
    ▼ 串口每帧打印一行："[KEY] S2 ... 按下 → ID=0x024 标准帧 DLC=8 [...] 发送成功"
 ```
 
-接收方向（当前未使用）：`CanBus::poll()` → `_drainRx()` → `onFrame` 回调 → `CanFrame` 结构。
+接收方向（v1.2 起用于预警）：
+
+```
+0x15 预警帧（MBox 广播，100ms）
+   │
+   ▼ CanBus::poll() → _drainRx() → onFrame 回调
+AlarmBusiness::onFrame()  ── ID==0x15 且非扩展帧且 DLC>=8 才处理 ──┐
+   │      ├─ 逐信号解码（AlarmMap.h 的表：B2 BSD/LCW、B3 RCW/FCW）│
+   │      ├─ 类型级聚合：活跃计数 + 最高等级（避免每帧重置节拍）    │
+   │      └─ 仅在"整体活跃态 / 最高等级"变化时发一次 WarningEvent  │
+   ▼ WarningEvent{ RCW / FCW, level, active }
+Buzzer::onWarning()  ──→ Buzzer::poll()（loop 里推进 150ms 节拍）
+   │
+   ▼ GPIO23 高/低电平 ──→ 5V 有源蜂鸣器模块
+串口："[BUZ] FCW 长鸣开始" / "[BUZ] RCW 滴滴滴开始" / "[BUZ] 预警消失，补一拍后停止"
+```
 
 ### 5.4 模块 API 速查
 
@@ -535,6 +671,28 @@ CanBus::transmit()  ──→ ESP32 TWAI 驱动 ──→ GPIO5(TX)/GPIO4(RX)
 | `const char* lastPageName()` / `const KeyAction* lastAction()` | 串口 `p` 命令：最近按下的页面名 / 完整 `KeyAction`（未按过返回 `nullptr`） |
 | `bool isRunning()` | 是否初始化成功 |
 
+**`Buzzer`（src/buzzer/Buzzer.h，全局单例 `buzzer`）** —— v1.2 新增
+
+| 接口 | 说明 |
+|---|---|
+| `bool begin()` | 配置 `BUZZER_PIN` 为输出并**先拉低静音**；打印引脚/触发极性/节拍参数 |
+| `void onWarning(const WarningEvent& evt)` | 预警事件入口：更新 FCW/RCW 活跃态 → 计算模式（FCW 优先）→ 起拍/切模式/标记补拍；BSD/LCW/NONE 直接 return |
+| `void poll()` | 主循环调用：推进 RCW 150/150 节拍；处理"下降沿后补完这一拍即停" |
+| `void stop()` | 立即静音并清空所有活跃状态 |
+| `bool isBeeping()` / `Mode mode()` / `bool outputOn()` | 状态查询（`b` 命令打印用） |
+| `static const char* modeName(Mode)` | `静音` / `FCW 长鸣` / `RCW 滴滴滴` |
+
+**`AlarmBusiness`（src/app/AlarmBusiness.h，全局单例 `alarmBusiness`）** —— v1.2 新增
+
+| 接口 | 说明 |
+|---|---|
+| `bool begin()` | `buzzer.begin()` + `canBus.onFrame(...)` 注册；打印监听参数 |
+| `void onFrame(const CanFrame& frame)` | `0x15` 过滤 → 逐信号解码（`ALARM_SIGNALS[]`）→ 类型级聚合 → 仅在整体变化时调 `buzzer.onWarning()` |
+| `void tick()` | `0x15` 链路超时检查（`ALARM_LINK_TIMEOUT_MS`）→ 超时强制静音 |
+| `void simulateFCW(bool active = true)` / `simulateRCW(...)` / `simulateClearAll()` | 串口 `f` / `r` / `x`：不接总线也能验三种响法（模拟态在收到真实 `0x15` 后自动作废） |
+| `void printStatus()` | 串口 `b` / `p`：蜂鸣器模式 + FCW/RCW/BSD/LCW 活跃态 + `0x15` 收帧统计 |
+| `uint32_t rxFrames()` / `lastRxAgeMs()` / `fcwActive()` / `rcwActive()` / `highestLevel(type)` | 统计与查询 |
+
 ### 5.5 `KeyAction` 结构 = 一行一个按键
 
 ```cpp
@@ -565,9 +723,9 @@ static_assert(sizeof(kKeyActions) / sizeof(kKeyActions[0]) == KEY_COUNT,
               "KeyCanMap.h 的报文表行数必须等于 BoardPins.h 中的 KEY_COUNT");
 ```
 
-**加一个按键的三步（例：S6 接 GPIO23，切到"后向实时 0x1"）**
+**加一个按键的三步（例：S6 接 GPIO25，切到"后向实时 0x1"）**
 
-1. `src/config/BoardPins.h`：`KEY_COUNT` 改成 `6`，`KEY_PINS[]` 末尾加 `23`；
+1. `src/config/BoardPins.h`：`KEY_COUNT` 改成 `6`，`KEY_PINS[]` 末尾加 `25`（**不要用 GPIO23，它已分配给蜂鸣器**）；
 2. `src/app/KeyCanMap.h`：表里加一行
    ```cpp
    { "S6 后向实时", 0x24, false, 8, { 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0 }, KeySendMode::PRESS_ONLY, 0, { 0 } },
@@ -593,15 +751,22 @@ static_assert(sizeof(kKeyActions) / sizeof(kKeyActions[0]) == KEY_COUNT,
 | **保活帧默认关闭** | 保活帧 `B3=0x00` 虽不翻页，但上电就周期占总线没必要；MBox 若强制要求再打开 |
 | **bus-off 自动恢复** | 现场振动/线束干扰偶发 bus-off，100ms 巡检自动恢复，无需人工复位 |
 | **TX 队列 8 帧** | ESP32 默认只有 5，连按几下就满；`txFailed` 会飙高 |
+| **蜂鸣器用 GPIO23，不动按键** | S4 已占 GPIO19；GPIO23 空闲且非 strapping。改引脚只改 `BoardPins.h` 一处，语音盒的蜂鸣器引脚不影响本板 |
+| **蜂鸣逻辑从 VoiceBox 原样移植** | FCW 长鸣 / RCW 150+150 滴滴滴 / 优先级 / 补一拍已在实际项目验证过，保持一致可避免行为回归 |
+| **`0x15` 每帧只解码、状态变化才通知** | 周期帧每帧都通知会把滴滴滴节拍不停重置（变成一直响）；类型级聚合让节拍稳定 |
+| **加 `0x15` 链路超时** | 断线时正在长鸣的蜂鸣器会一直叫（VoiceBox 的隐患）；500ms 无帧强制静音，可宏关闭 |
+| **BSD / LCW 只解码不发声** | 与 VoiceBox 一致；日后要加提示只需改 `AlarmMap.h` 的 `beep` 列 + `Buzzer::onWarning` 一个分支 |
 
 ### 5.7 已知限制与扩展方向
 
 | 限制 | 说明 / 后续做法 |
 |---|---|
-| 只发不收 | `CanBus` 已支持接收回调、`CanBits` 已支持位域解析，但业务层未对接；将来要读 `0x15` 状态帧（车速/转向等）再补 |
+| 接收只解析 `0x15` 的预警位 | `CanBus` 已支持接收回调、`CanBits` 已支持位域解析；当前只对 `0x15` 的 `B2`/`B3` 解码，`B0/B1/B4/B6`（版本、摄像头、SD 卡、功能开关、生命信号）未使用 |
+| 蜂鸣器只有一种输出 | 未接三级预警灯（WS2812B）与语音播报；需要时按 `buzzer/` 的目录结构再加 `light/` 模块，`WarningType` 可直接复用 |
+| BSD / LCW 不发声 | 与 VoiceBox 行为一致；要开只需在 `Buzzer::onWarning()` 加分支（或按类型区分长鸣/短鸣） |
 | 整帧覆盖式发送 | 以后若要同时支持"录像/拍照/BSD 开关"等键，必须引入**影子帧**（保存各信号当前值，发送前合成整帧），否则按键会互相清零 |
 | 未接入文件系统 / OTA | `partitions.csv` 预留了 OTA + LittleFS（1.44MB），当前未使用 |
-| 策略参数不可现场调 | `KEY_TX_REPEAT` 等是编译期宏；如需现场可调可加 NVS 存储 |
+| 策略参数不可现场调 | `KEY_TX_REPEAT` / `BUZZER_RCW_ON_MS` 等是编译期宏；如需现场可调可加 NVS 存储 |
 | 串口日志常开 | `_sendAction()` 每帧都打印，约 3.5ms/行 @115200；量产若嫌啰嗦可加编译开关（当前 3 帧共 ~10ms，不影响 20ms 帧间隔） |
 | 按键上限 8 路 | `KeyPad::MAX_KEYS = 8`（与 8 路按键板硬件一致）；要更多需改数组维度 |
 
@@ -631,10 +796,15 @@ static_assert(sizeof(kKeyActions) / sizeof(kKeyActions[0]) == KEY_COUNT,
 [KEY]   S5 (GPIO21) -> ID=0x024 标准帧 DLC=8 [00 00 00 45 00 00 00 00]  S5 组合页面+四图平铺（按下连发 3 帧，间隔 20 ms）
 [KEY] 按下连发 3 帧，帧间隔 20 ms，连按抑制 300 ms
 [KEY] 0x24 保活帧：关闭（只在按键时发送，上电不动 MBox 页面）
+[BUZ] 蜂鸣器 GPIO23 初始化完成（高电平触发，RCW 150ms 响 / 150ms 停）
+[BUZ] 预警监听已启动：ID=0x015（标准帧，8 字节），链路超时 500ms
+[BUZ] 位序模式：字节内自 LSB 起（默认）
 [App] 串口命令: k1~k5 模拟按键, p 打印 CAN 统计, t 打印报文表
+[App] 蜂鸣器调试: f 模拟FCW, r 模拟RCW, x 模拟全部消失, b 蜂鸣器状态
+[BUZ] 0x15 首帧到达（B2=0x00 B3=0x00），预警监听就绪      ← 只有总线上有 0x15 时才会出现
 ```
 
-> 启动后**没有任何 CAN 发送动作**，MBox 保持自己的页面。
+> 启动后**没有任何 CAN 发送动作**，MBox 保持自己的页面；蜂鸣器引脚在上电时已被拉低（不响）。
 
 ### 6.2 按键日志（按一次 S2 的完整输出）
 
@@ -662,8 +832,12 @@ static_assert(sizeof(kKeyActions) / sizeof(kKeyActions[0]) == KEY_COUNT,
 | 命令 | 作用 | 输出样例 |
 |---|---|---|
 | `k1` ~ `k5` | 模拟对应按键按下（不需按键板） | `[SIM] 模拟 S2 ... 按下` + 3 帧日志 |
-| `p` | 打印 CAN 统计 + 最近页面 | 见下 |
+| `p` | 打印 CAN 统计 + 最近页面 + 预警状态 | 见下 |
 | `t` | 重新打印映射表 | 同 6.1 的表 |
+| `f` | 【v1.2】模拟 FCW 触发（长鸣，不需总线） | `[BUZ] 串口模拟 FCW 触发` + `[BUZ] FCW 长鸣开始` |
+| `r` | 【v1.2】模拟 RCW 触发（滴滴滴） | `[BUZ] 串口模拟 RCW 触发` + `[BUZ] RCW 滴滴滴开始` |
+| `x` | 【v1.2】模拟预警全部消失（验证"补一拍"） | `[BUZ] 预警全部清除（串口模拟清除）` + `[BUZ] RCW 补完停止` |
+| `b` | 【v1.2】打印蜂鸣器 / 预警状态 | 见下 |
 
 `p` 的输出：
 
@@ -672,9 +846,20 @@ static_assert(sizeof(kKeyActions) / sizeof(kKeyActions[0]) == KEY_COUNT,
 [CAN] TEC=0 REC=0 bus-off=0 次 接收丢帧=0
 [CAN] 尚未收到任何报文
 [KEY] 最近页面：S2 前向为主+后左右三小图 → ID=0x024 B3=0x42
+[BUZ] 蜂鸣器 GPIO23：静音（输出 OFF）| 模式=静音
+[BUZ] 预警状态：0x15 尚未收到任何帧（总线累计收帧 0）
+```
+
+总线上有 `0x15` 时（`b` 命令同样内容）：
+
+```
+[BUZ] 蜂鸣器 GPIO23：鸣响中（输出 ON）| 模式=RCW 滴滴滴
+[BUZ] 预警状态：FCW=OFF RCW=ON(L1) BSD=OFF LCW=OFF
+[BUZ] 0x15 收帧 136，最近 42ms 前，链路 正常
 ```
 
 判断要点：`发送 3 帧 / 失败 0 次` 且 `TEC=0` = 链路正常；`失败 N 次 + TEC 上升` = 无 ACK / 接线问题。
+`0x15 收帧` 一直不增长 = 总线没有 `0x15`（MBox 未广播预警）或接线/波特率问题。
 
 ### 6.4 引脚探测模式（首次核对接线用）
 
@@ -726,6 +911,46 @@ static_assert(sizeof(kKeyActions) / sizeof(kKeyActions[0]) == KEY_COUNT,
   ```
 - 验证完请把 `-DCAN_MODE` 改回 `0`。
 
+### 6.6 预警蜂鸣日志样例（v1.2）
+
+不需要总线，直接串口敲 `f` / `r` / `x` 即可验证三种响法：
+
+```
+> f
+[BUZ] 串口模拟 FCW 触发
+[BUZ] FCW 长鸣开始
+> x
+[BUZ] 预警全部清除（串口模拟清除）
+[BUZ] 预警消失，补一拍后停止
+[BUZ] FCW 补完停止                     ← FCW 是持续电平，不补拍，立即停
+> r
+[BUZ] 串口模拟 RCW 触发
+[BUZ] RCW 滴滴滴开始
+> f
+[BUZ] 串口模拟 FCW 触发
+[BUZ] 切换至 FCW 长鸣                  ← FCW 优先级高于 RCW
+> x
+[BUZ] 预警全部清除（串口模拟清除）
+[BUZ] 预警消失，补一拍后停止
+[BUZ] RCW 补完停止                     ← RCW 在"响"的阶段被清 → 响满 150ms 才停
+```
+
+接上总线（MBox 或 USB-CAN 发 `0x15`）后：
+
+```
+[BUZ] 0x15 首帧到达（B2=0x00 B3=0x04），预警监听就绪
+[BUZ] 0x15 FCW（FCW L1）触发
+[BUZ] FCW 长鸣开始
+[BUZ] 0x15 FCW（FCW L1）消失
+[BUZ] 预警消失，补一拍后停止
+[BUZ] FCW 补完停止
+[BUZ] 超过 500ms 没有收到 0x15，判定预警链路中断，强制静音     ← 断线保护
+[BUZ] 0x15 恢复上报，预警监听恢复正常                          ← 总线恢复
+```
+
+> 若把 `-DALARM_DEBUG_RAW=1`，每帧都会多打一行
+> `[BUZ] RAW 0x15: A1 00 00 04 0F 00 5A 00`，用于现场核对字节位置与位序。
+
 ---
 
 ## 7. 编译、烧录与验证
@@ -769,12 +994,16 @@ VS Code 里等价操作：左下角 `√`（Build）、`→`（Upload）、插�
 | 6 | 接 CAN 分析仪（500k） | 抓到的帧：ID `0x024`、标准帧、DLC 8、非扩展帧、每次按键刚好 3 帧、间隔约 20ms |
 | 7 | 接 MBox 实机 | 按 S1~S5，MBox 分别切到 5 种页面；上电后页面不被改动 |
 | 8 | 长按 / 快按 / 双键同按 | 行为符合 4.5 表；不会跳到错误页面 |
+| 9 | 串口输入 `f` / `r` / `x`（不需要总线） | 长鸣 / 滴滴滴 / 补一拍停止，行为符合 4.6 表 |
+| 10 | CAN 分析仪以 100ms 周期发 `0x15`，`data[3]` 依次 `00 → 01 → 04 → 05 → 00` | 依次为：不响 → 滴滴滴 → 长鸣 → 长鸣（FCW 优先）→ 补一拍后停 |
+| 11 | 停发 `0x15`（保持最后一帧 `0x04`） | 500ms 后静音并打印"链路中断，强制静音" |
+| 12 | 蜂鸣器响的同时连按 S1~S5 | `0x24` 三帧照常发出、MBox 页面照常切换，按键手感与不装蜂鸣器时一致 |
 
 ### 7.4 本次实测编译结果
 
 ```
-RAM:   [==        ]   6.7% (used 21840 bytes from 327680 bytes)
-Flash: [==        ]  21.6% (used 282797 bytes from 1310720 bytes)
+RAM:   [=         ]   6.7% (used 21896 bytes from 327680 bytes)
+Flash: [==        ]  21.9% (used 286913 bytes from 1310720 bytes)
 SUCCESS
 ```
 
@@ -799,8 +1028,16 @@ SUCCESS
 | 双击同一个键只有第一次有效 | 300ms 连按抑制窗口 | 属预期行为；确需快速连按就调小 `-DKEY_PAGE_MUTEX_MS` |
 | 双键同按时页面不是最后按的 | 两键按下间隔超过 60ms，各自都发完了 3 帧 | 属预期行为（按顺序操作即可）；如需严格互斥可加大 `KEY_PAGE_MUTEX_MS` |
 | 日志出现"总线 bus-off（TEC=…），开始自动恢复" | 线束干扰 / CANH-CANL 短路 / 波特率不匹配 / 两端共 240Ω | 检查线束与终端电阻（`CANH-CANL` 应为 60Ω 或 120Ω）、确认全网 500 kbps；恢复是自动的 |
-| `p` 里 `接收 X 帧` 一直是 0 | 本板只发不收；`onFrame` 未注册 | 正常现象（当前业务不需要接收） |
+| `p` 里 `接收 X 帧` 一直是 0 | 总线上没有其它节点发帧（本板只监听 `0x15`） | 正常现象；按键发送不受影响 |
 | `p` 里"最近页面：（尚未按过按键）" | 上电后还没按过任何键 | 正常现象 |
+| 蜂鸣器**完全不响**（`f` 也不响） | `ENABLE_BUZZER=0` / 模块没接 5V / 极性接反 / 模块是低电平触发 | 确认 `-DENABLE_BUZZER=1`；量模块 VCC 是否 5V；低电平触发模块改 `-DBUZZER_ACTIVE_HIGH=0`；用 `b` 看"输出"是否变 ON |
+| `f` 有日志、`b` 显示"输出 ON"，但就是不响 | 3.3V 推不动 5V 模块（CMOS 输入型）/ IO 接错脚 | 模块 VCC 改接 `3V3` 试响；或加一级 NPN/2N7000；核对 `IO → GPIO23` |
+| 蜂鸣器**一直响不停** | `0x15` 里 FCW 一直是 1；或模块低电平触发却配了高电平 | 用 `-DALARM_DEBUG_RAW=1` 看 `B3`；确认预警真的消失；核对 `BUZZER_ACTIVE_HIGH` |
+| 收到 `0x15`，但 FCW/RCW 一直显示 OFF | 位序不对（字段不在预期位上） | 打开 `-DALARM_DEBUG_RAW=1` 看原始字节：报警时高 2 位变化 → 改 `-DALARM_BIT_ORDER_MSB=1`（见 3.6） |
+| 有 `0x15` 但从来没有预警位 | MBox 侧 FCW/RCW 功能未开启（`B4` 对应位 = 0）或相机未使能算法 | 先确认 MBox 仪表/App 上有预警提示；必要时让 MBox 侧打开该功能 |
+| 滴滴滴变成"一直响" | 每帧都触发事件（未做类型级聚合）或 `BUZZER_RCW_OFF_MS` = 0 | 本工程已做聚合；确认没有把 `onWarning` 接到每帧上；核对 `OFF_MS=150` |
+| FCW 消失后仍响一下才停 | 手上 `0x15` 还在周期性置位 FCW（MBox 侧报警未真正消失） | 属正常（以总线为准）；用分析仪确认 `data[3]` 的 bit2 何时归 0 |
+
 | 烧录报错 `Failed to connect` | 串口被别的程序占用 / 需要手动进下载模式 | 关掉其它串口工具；按住 `BOOT` → 点一下 `EN` → 松开 `BOOT` 再烧 |
 | 改了 `KEY_COUNT` 后编译报 static_assert 失败 | `KeyCanMap.h` 表行数与 `KEY_COUNT` 不一致 | 按 5.5 的三步同步修改 |
 
@@ -816,6 +1053,18 @@ SUCCESS
       └─ 是 ──→ 问题在 MBox 侧（未接该报文解析 / 固件版本不支持流媒体切换）
 ```
 
+预警蜂鸣不工作时（v1.2）：
+
+```
+蜂鸣器不响？
+├─ 串口敲 f 响不响？ ── 否 ──→ 硬件/配置问题：ENABLE_BUZZER、5V、极性、GPIO23（见 8.1）
+└─ 响 ──→ 蜂鸣器与固件正常，问题在总线侧
+   ├─ p 里「0x15 收帧」在增长？ ── 否 ──→ 总线上没有 0x15：MBox 未广播 / 接线 / 波特率
+   └─ 是
+      ├─ 报警时 B3 的 bit0~2 有变化？（ALARM_DEBUG_RAW=1） ── 否 ──→ MBox 侧预警功能未开启
+      └─ 是 ──→ 若高低位反了：-DALARM_BIT_ORDER_MSB=1
+```
+
 ---
 
 ## 9. 变更记录与维护约定
@@ -824,6 +1073,7 @@ SUCCESS
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.2 | 2026-10-29 | 新增**第二条业务：监听 `0x15` 的 FCW/RCW → 蜂鸣器**（GPIO23，5V 有源，高电平触发）。新增 `config/AlarmMap.h`、`buzzer/Buzzer.*`、`app/AlarmBusiness.*`；`BoardPins.h` 追加蜂鸣器宏（**按键引脚与按键业务一行未改**，S4 仍为 GPIO19）。文档新增 3.6（`0x15` 字段表/解码/位序/样例帧）、4.6（蜂鸣逻辑与时间轴）、5.3 接收数据流、5.4 API、6.3 `f/r/x/b` 命令、6.6 日志样例、7.3 验证 9~12、8.1 排障 7 条、附录 A/B；`p` 命令增打预警状态 |
 | v1.1 | 2026-10-29 | 增补 **2.6 按键检测原理：上下拉是由 ESP32 内部 `INPUT_PULLUP`（≈45kΩ）提供**（等效电路 / 电平电流 / 代码两行 / 何时必须外接电阻 / 四个常见坑）；2.1 增加可选外部上拉电阻与 100nF 电容；2.4 补充内部上下拉可用性与 GPIO34~39 限制；8.1 增加"COM 误接 3V3""引脚浮空乱触发"两条排障 |
 | v1.0 | 2026-10-29 | 首版：5 路按键（S1~S5）→ `0x24` 流媒体显示切换（B3 = `0x41`~`0x45`）；含硬件接线、协议、工作流、代码架构、调试与排查 |
 
@@ -836,7 +1086,9 @@ SUCCESS
 |---|---|
 | `0x24` 是否必须 100ms 周期在线 | 若 MBox 侧要求周期帧，把 `-DCAN_CTRL_KEEPALIVE_MS=100` 打开即可，**业务代码无需改动**（保活帧 `B3=0x00` 不翻页） |
 | 帧类型确认 | 协议表标注 `0x24` 为标准帧（11bit），已按标准帧发送；若实际总线用 29bit 扩展帧封装，把 `KeyCanMap.h` 5 行的 `false` 改 `true` |
-| 若以后加蜂鸣器 | `platformio.ini` 里 GPIO19 被预留给了蜂鸣器，需把 S4 从 GPIO19 换到 GPIO23（只改 `BoardPins.h` 一行） |
+| **MBox 是否真的在广播 `0x15`** | 用 CAN 分析仪抓 3 秒总线确认（应为 100ms 一帧）。若 MBox 固件不发，蜂鸣器预警无法工作，需先让 MBox 侧开启 FCW/RCW 功能（`B4` 对应位为 1） |
+| **`0x15` 位序确认** | 表里标 "Motorola LSB" + `起始Bit` 线性编号，已按"字节内自 LSB 起"解码；现场抓报警帧核对，反了就改 `-DALARM_BIT_ORDER_MSB=1` |
+| 蜂鸣器模块触发兼容性 | 5V 有源模块用 3.3V 驱动一般可用；若个别模块不动作，把模块 VCC 改接 3V3 或加一级三极管（见 2.2 蜂鸣器部分） |
 
 ### 9.3 文档维护约定
 
@@ -847,9 +1099,11 @@ SUCCESS
 | 引脚 / 波特率 / `KEY_COUNT` | 2.2、2.4、附录 A |
 | 按键接法 / 内部上下拉 / 外部电阻选型 | 2.1、2.2、2.4、2.6、8.1 |
 | 报文 ID / 数据字节 / 新增按键 | 3.4、5.5、6.1 样例 |
+| `0x15` 预警字段 / 位序 / 蜂鸣表现 | 3.6、4.6、5.4、6.6、附录 A、附录 B |
 | 发送策略宏（连发帧数 / 间隔 / 抑制 / 保活） | 4.4、附录 A |
+| 蜂鸣器引脚 / 节拍 / 超时 | 2.1、2.2、2.4、4.6、附录 A |
 | 新增模块或文件 | 5.1、5.2 |
-| 日志或串口命令格式 | 6.1、6.2、6.3 |
+| 日志或串口命令格式 | 6.1、6.2、6.3、6.6 |
 
 ---
 
@@ -873,10 +1127,20 @@ SUCCESS
 | `KEY_TX_REPEAT_GAP_MS` | `20` | BoardPins.h / ini | ✅ | 补发帧间隔（ms） |
 | `KEY_PAGE_MUTEX_MS` | `300` | BoardPins.h / ini | ✅ | 同键连按抑制窗口（ms） |
 | `CAN_CTRL_KEEPALIVE_MS` | `0` | BoardPins.h / ini | ✅ | `0` = 不保活；`100` = 空闲按 100ms 发 `B3=0x00` 保活帧 |
-| `ENABLE_SERIAL_SIM` | `1` | main.cpp / ini | ✅ | 串口 `k1~k5`/`p`/`t` 命令开关，量产可设 `0` |
+| `ENABLE_SERIAL_SIM` | `1` | main.cpp / ini | ✅ | 串口 `k1~k5`/`f`/`r`/`x`/`b`/`p`/`t` 命令开关，量产可设 `0` |
+| `ENABLE_BUZZER` | `1` | main.cpp / ini | ✅ | 【v1.2】`1` 启用蜂鸣器预警业务；`0` 完全关闭（不初始化、不注册回调） |
+| `BUZZER_PIN` | `23` | BoardPins.h / ini | ✅ | 【v1.2】蜂鸣器控制脚（**不要与 S1~S5 的 13/14/18/19/21 冲突**） |
+| `BUZZER_ACTIVE_HIGH` | `1` | BoardPins.h / ini | ✅ | 【v1.2】`1` 高电平触发（默认）/ `0` 低电平触发模块 |
+| `BUZZER_RCW_ON_MS` | `150` | Buzzer.h / ini | ✅ | 【v1.2】RCW 滴滴滴 - 响的时长（ms） |
+| `BUZZER_RCW_OFF_MS` | `150` | Buzzer.h / ini | ✅ | 【v1.2】RCW 滴滴滴 - 间隔时长（ms）；设 0 = 一直响 |
+| `ALARM_LINK_TIMEOUT_MS` | `500` | BoardPins.h / ini | ✅ | 【v1.2】多少 ms 没收到 `0x15` 就强制静音；`0` = 关闭该保护（= VoiceBox 行为） |
+| `ALARM_BIT_ORDER_MSB` | `0` | AlarmMap.h / ini | ✅ | 【v1.2】`0` 字节内自 LSB 起（默认）/ `1` 自 MSB 起 |
+| `ALARM_DEBUG_RAW` | `0` | BoardPins.h / ini | ✅ | 【v1.2】`1` = 每帧打印 `0x15` 原始 8 字节（核位序用） |
 | `CORE_DEBUG_LEVEL` | `2` | platformio.ini | — | 框架日志等级（2 = Warn，抑制 VFS 报错刷屏） |
 
-> 注：`platformio.ini` 的 `build_flags` 里**没有**定义 `KEY_COUNT`，它只来自 `BoardPins.h`。
+> 注 1：`platformio.ini` 的 `build_flags` 里**没有**定义 `KEY_COUNT`，它只来自 `BoardPins.h`。
+> 注 2：`ALARM_MSG_ID`（`0x15`）、`ALARM_MSG_DLC`（`8`）与 `ALARM_SIGNALS[]` 表在 `AlarmMap.h`，**没有 `#ifndef` 保护**，
+> 要改协议只能直接改该文件（这是故意设计：协议细节集中一处，不用 `-D` 打散）。
 
 ---
 
@@ -885,16 +1149,21 @@ SUCCESS
 | 项目 | 值 |
 |---|---|
 | CAN 波特率 | 500 kbps |
-| 报文 | `0x24`，标准帧，DLC 8，`data[3]` = `0x41`~`0x45` |
+| 报文（发送） | `0x24`，标准帧，DLC 8，`data[3]` = `0x41`~`0x45` |
+| 报文（监听） | `0x15`，标准帧，DLC 8，100 ms 周期，`B3.0~1` = RCW，`B3.2` = FCW |
 | 按键扫描节拍 | 5 ms |
 | 消抖时间 | 25 ms |
 | 每次按下发送帧数 | 3 帧 |
 | 补发帧间隔 | 20 ms |
 | 同键连按抑制 | 300 ms |
 | 上电发帧数 | **0 帧** |
+| 蜂鸣器引脚 / 触发 | GPIO23 / 高电平（5V 有源模块） |
+| RCW 滴滴滴节拍 | 响 150 ms / 停 150 ms（约 3.3 次/秒） |
+| FCW 提示 | 持续长鸣（不补拍，消失立即停） |
+| `0x15` 链路超时 | 500 ms（无帧即强制静音） |
 | 串口 | 115200 / 8N1 |
 | 按键数 / 页面数 | 5 / 5 |
-| 固件占用 | RAM 6.7%，Flash 21.6% |
+| 固件占用 | RAM 6.7%，Flash 21.9% |
 
 ---
 

@@ -1,5 +1,5 @@
 /*
- * MBox-M4P-IO — 5 路按键 → MBox 流媒体页面切换(0x24)
+ * MBox-M4P-IO — 5 路按键 → MBox 流媒体页面切换(0x24) + 监听 0x15 的 FCW/RCW 预警蜂鸣
  *
  * 功能：按键板 S1~S5 按下 → 消抖确认 → 通过 SN65HVD230(3.3V) + ESP32 TWAI
  *       发送 0x24 报文里的「流媒体显示切换」信号（B3 = 0x41~0x45），
@@ -19,6 +19,12 @@
  *   按键板 COM               -> GND（按键板不需要 VCC）
  *   按键板 S6~S8             -> 不接线（固件不扫描）
  *
+ * 第二条业务（与按键完全独立）：监听 0x15「ADAS 状态广播」里的
+ *   FCW（前车碰撞预警，B3.2）与 RCW（后车碰撞预警，B3.0~B3.1），
+ *   用蜂鸣器提示：FCW = 持续长鸣；RCW = 150ms 响 / 150ms 停 滴滴滴。
+ *   蜂鸣器：5V 有源模块（高电平触发）VCC->VIN/5V，GND->GND，IO->GPIO23。
+ *   （S4 仍占用 GPIO19，按键引脚与业务一行未改）
+ *
  * 页面（0x24 报文的 B3）：
  *   S1 = 0x41 后向为主+前左右三小图      S2 = 0x42 前向为主+后左右三小图
  *   S3 = 0x43 左侧为主+前后右三小图      S4 = 0x44 右侧为主+前后左三小图
@@ -26,7 +32,9 @@
  *
  * 串口命令（115200）：
  *   k1~k5  模拟按键按下（不需要按键板即可验证报文）
- *   p      打印 CAN 统计 + 最近按下的页面
+ *   f      模拟 FCW 触发（长鸣）      r   模拟 RCW 触发（滴滴滴）
+ *   x      模拟预警全部消失（验证"补一拍"）  b   打印蜂鸣器/预警状态
+ *   p      打印 CAN 统计 + 最近按下的页面 + 预警状态
  *   t      打印按键 → 报文映射表
  */
 
@@ -36,9 +44,15 @@
 #include "input/KeyPad.h"
 #include "app/KeyCanMap.h"
 #include "app/KeyCanBusiness.h"
+#include "buzzer/Buzzer.h"
+#include "app/AlarmBusiness.h"
 
 #ifndef ENABLE_SERIAL_SIM
 #define ENABLE_SERIAL_SIM 1
+#endif
+
+#ifndef ENABLE_BUZZER
+#define ENABLE_BUZZER 1
 #endif
 
 static KeyPad keyPad;
@@ -71,6 +85,10 @@ static void printCanStats() {
         Serial.printf("[KEY] 最近页面：%s → ID=0x%03lX B3=0x%02X\n", last->name,
                       (unsigned long)last->id, last->data[3]);
     }
+
+#if ENABLE_BUZZER
+    alarmBusiness.printStatus();
+#endif
 }
 
 static void handleSerialCommand() {
@@ -88,6 +106,14 @@ static void handleSerialCommand() {
         if (c == 'k' || c == 'K') { pendingCmd = 'k'; continue; }
         if (c == 'p' || c == 'P') { printCanStats(); continue; }
         if (c == 't' || c == 'T') { keyCanBusiness.printTable(); continue; }
+
+#if ENABLE_BUZZER
+        // 蜂鸣器调试：不需要 CAN 总线即可验证三种响法
+        if (c == 'f' || c == 'F') { alarmBusiness.simulateFCW(true); continue; }
+        if (c == 'r' || c == 'R') { alarmBusiness.simulateRCW(true); continue; }
+        if (c == 'x' || c == 'X') { alarmBusiness.simulateClearAll(); continue; }
+        if (c == 'b' || c == 'B') { alarmBusiness.printStatus(); continue; }
+#endif
     }
 }
 #endif  // ENABLE_SERIAL_SIM
@@ -123,9 +149,17 @@ void setup() {
     }
 #endif
 
+#if ENABLE_BUZZER
+    // 蜂鸣器业务：监听 0x15 的 FCW/RCW 预警（与按键业务完全独立）
+    alarmBusiness.begin();
+#endif
+
 #if ENABLE_SERIAL_SIM
     Serial.printf("[App] 串口命令: k1~k%d 模拟按键, p 打印 CAN 统计, t 打印报文表\n",
                   KEY_COUNT);
+#if ENABLE_BUZZER
+    Serial.println("[App] 蜂鸣器调试: f 模拟FCW, r 模拟RCW, x 模拟全部消失, b 蜂鸣器状态");
+#endif
 #endif
 }
 
@@ -136,9 +170,14 @@ void loop() {
     keyPad.debugScan();
 #endif
 
-    canBus.poll();          // 排空接收队列 + bus-off 自动恢复
+    canBus.poll();          // 排空接收队列（0x15 预警帧在这里回调）+ bus-off 自动恢复
     keyPad.poll();          // 5ms 节拍扫描 + 消抖
     keyCanBusiness.tick();  // HOLD_REPEAT 周期发送
+
+#if ENABLE_BUZZER
+    alarmBusiness.tick();   // 0x15 链路超时检查
+    buzzer.poll();          // 推进 RCW 滴滴滴节拍 / 处理"补一拍"
+#endif
 
 #if ENABLE_SERIAL_SIM
     handleSerialCommand();

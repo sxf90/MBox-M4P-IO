@@ -56,8 +56,8 @@
 
 // 按键 GPIO 分配（顺序即按键板 S1..S5）
 // 选型理由：均带内部上拉、非 strapping 脚、不占 Flash(6-11)/UART0(1,3)/CAN(4,5)
-// 注意：GPIO19 / GPIO22 在 platformio.ini 里被预留给了蜂鸣器 / WS2812 灯带，
-//       本工程不启用这两块，故 S4 用 GPIO19；若以后要加蜂鸣器，把 S4 改到 GPIO23。
+// 注意：GPIO22 在 platformio.ini 里被预留给了 WS2812 灯带（本工程不启用）；
+//       GPIO23 已分配给蜂鸣器（见文件末尾 BUZZER_PIN），S1~S5 引脚维持不变。
 #define KEY_PIN_S1      13
 #define KEY_PIN_S2      14
 #define KEY_PIN_S3      18
@@ -88,3 +88,40 @@ static const uint8_t KEY_PINS[KEY_COUNT] = {
 #ifndef CAN_CTRL_KEEPALIVE_MS
 #define CAN_CTRL_KEEPALIVE_MS    0
 #endif
+
+// ════════════════════════════════════════════════════════════════
+// ─── 蜂鸣器：监听 0x15 的 FCW / RCW 预警（独立业务，与按键无关）──
+// ════════════════════════════════════════════════════════════════
+// 硬件：5V 有源蜂鸣器模块（高电平触发，模块自带三极管驱动）
+//   模块 VCC -> VIN / 5V（USB 5V；不要把 5V 模块接到 3V3）
+//   模块 GND -> GND    （与 CAN 模块、按键板 COM 共地）
+//   模块 IO  -> GPIO23 （串 100Ω 限流，可选 100kΩ 下拉防上电误响）
+//
+// 为什么是 GPIO23：本工程 S1~S5 占用 13/14/18/19/21（GPIO19 是 S4，保持不动），
+// GPIO23 空闲、非 strapping、可输出，原注释里就是 S6 的预留脚。
+//
+// 逻辑（与 VoiceBox 的 BuzzerManager 完全一致）：
+//   FCW 触发 → 持续高电平长鸣；RCW 触发 → 150ms 响 / 150ms 停 循环
+//   FCW 优先于 RCW；预警消失时补完当前这一拍再停
+#ifndef BUZZER_PIN
+#define BUZZER_PIN        23
+#endif
+
+// 1 = 高电平触发（默认，配套常见 5V 有源蜂鸣器模块）
+// 0 = 低电平触发（若用低电平触发模块，改这里，不用动业务代码）
+#ifndef BUZZER_ACTIVE_HIGH
+#define BUZZER_ACTIVE_HIGH 1
+#endif
+
+// 0x15 预警链路超时：超过该时间没收到 0x15，视为预警全部消失并强制静音
+// （防止 MBox 掉电/断线时正在长鸣的蜂鸣器一直叫）
+// 500ms ≈ 容忍连续丢 5 帧（协议周期 100ms）；设为 0 则关闭，行为与 VoiceBox 一致
+#ifndef ALARM_LINK_TIMEOUT_MS
+#define ALARM_LINK_TIMEOUT_MS  500
+#endif
+
+// 1 = 0x15 每帧都打印原始数据（现场核对位序时用，量产设为 0）
+#ifndef ALARM_DEBUG_RAW
+#define ALARM_DEBUG_RAW   0
+#endif
+
